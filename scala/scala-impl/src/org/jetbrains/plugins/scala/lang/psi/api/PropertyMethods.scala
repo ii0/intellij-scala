@@ -11,7 +11,8 @@ import org.jetbrains.plugins.scala.lang.psi.api.toplevel.ScTypedDefinition
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.typedef.ScMember
 import org.jetbrains.plugins.scala.lang.psi.fake.FakePsiMethod.{getter, setter}
 import org.jetbrains.plugins.scala.lang.psi.types.ScType
-import org.jetbrains.plugins.scala.lang.refactoring.util.ScalaNamesUtil
+import org.jetbrains.plugins.scala.lang.refactoring.util.ScalaNamesUtil._
+import org.jetbrains.plugins.scala.lang.refactoring.util.ScalaNamesUtil.isBacktickedName.withoutBackticks
 
 import scala.collection.Seq
 
@@ -22,31 +23,24 @@ object PropertyMethods extends Enumeration {
 
   private val beanMethods = Seq(GETTER, IS_GETTER, SETTER)
 
+  val allRoles: Seq[DefinitionRole] = values.toSeq
+
   def isSetter(role: DefinitionRole): Boolean = role == SETTER || role == EQ
 
-  def methodName(propertyName: String, role: DefinitionRole): String = role match {
-    case SIMPLE_ROLE => propertyName
-    case GETTER      => beanGetterName(propertyName)
-    case IS_GETTER   => booleanGetterName(propertyName)
-    case SETTER      => beanSetterName(propertyName)
-    case EQ          => scalaSetterName(propertyName)
+  def methodName(propertyName: String, role: DefinitionRole): String = scalaMethodName(propertyName, decoration(role))
+
+  def javaMethodName(propertyName: String, role: DefinitionRole): String = javaMethodName(propertyName, decoration(role))
+
+  private def decoration(role: DefinitionRole): String => String = role match {
+    case SIMPLE_ROLE => identity
+    case GETTER      => "get" + _.capitalize
+    case SETTER      => "set" + _.capitalize
+    case IS_GETTER   => "is"  + _.capitalize
+    case EQ          => _ + "_="
   }
 
-  def methodRole(methodName: String, propertyName: String): Option[DefinitionRole] = {
-    if (methodName == propertyName) Some(SIMPLE_ROLE)
-    else if (methodName == beanGetterName(propertyName)) Some(GETTER)
-    else if (methodName == booleanGetterName(propertyName)) Some(IS_GETTER)
-    else if (methodName == beanSetterName(propertyName)) Some(SETTER)
-    else if (methodName == scalaSetterName(propertyName)) Some(EQ)
-    else None
-  }
-
-  def javaMethodName(propertyName: String, role: DefinitionRole): String = {
-    val javaName = ScalaNamesUtil.toJavaName(propertyName)
-    role match {
-      case EQ => scalaSetterJavaName(javaName)
-      case _  => methodName(javaName, role)
-    }
+  def methodRole(mName: String, propertyName: String): Option[DefinitionRole] = {
+    values.find(mName == methodName(propertyName, _))
   }
 
   private val cache: ConcurrentMap[(ScTypedDefinition, DefinitionRole), Option[PsiMethod]] = ContainerUtil.newConcurrentMap()
@@ -66,18 +60,38 @@ object PropertyMethods extends Enumeration {
     }
   }
 
-  def scalaSetterName(name: String)  : String = name + "_="
+  def isApplicable(role: DefinitionRole, t: ScTypedDefinition): Boolean = {
+    val (isBeanProp, isBooleanBeanProp) = t.nameContext match {
+      case s: ScAnnotationsHolder => (isBeanProperty(s), isBooleanBeanProperty(s))
+      case _ => (false, false)
+    }
+    role match {
+      case SIMPLE_ROLE => true
+      case EQ          => t.isVar
+      case GETTER      => isBeanProp
+      case IS_GETTER   => isBooleanBeanProp
+      case SETTER      => t.isVar && (isBeanProp || isBooleanBeanProp)
+    }
+  }
 
-  def scalaSetterJavaName(name: String)  : String = name + "_$eq"
+  def beanSetterName(name: String)   : String = methodName(name, SETTER)
+  def beanGetterName(name: String)   : String = methodName(name, GETTER)
+  def booleanGetterName(name: String): String = methodName(name, IS_GETTER)
 
-  def beanSetterName(name: String)   : String = "set" + name.capitalize
+  def javaEqSetterName(name: String)     : String = javaMethodName(name, EQ)
+  def javaBeanSetterName(name: String)   : String = javaMethodName(name, SETTER)
+  def javaBeanGetterName(name: String)   : String = javaMethodName(name, GETTER)
+  def javaBooleanGetterName(name: String): String = javaMethodName(name, IS_GETTER)
 
-  def beanGetterName(name: String)   : String = "get" + name.capitalize
+  private def javaMethodName(scalaName: String, decoration: String => String): String = {
+    toJavaName(decoration(withoutBackticks(scalaName)))
+  }
 
-  def booleanGetterName(name: String): String = "is" + name.capitalize
+  private def scalaMethodName(scalaName: String, decoration: String => String): String =
+    clean(decoration(withoutBackticks(scalaName)))
 
   def propertyMethodNames(name: String): Seq[String] =
-    scalaSetterName(name) :: beanSetterName(name) :: beanGetterName(name) :: booleanGetterName(name) :: Nil
+    (values - SIMPLE_ROLE).map(methodName(name, _)).toSeq
 
   def getPropertyMethod(t: ScTypedDefinition, role: DefinitionRole): Option[PsiMethod] = {
     if (!mayHavePropertyMethod(t, role))
